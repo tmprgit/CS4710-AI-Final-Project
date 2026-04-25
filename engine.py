@@ -52,9 +52,9 @@ except ImportError:
 # Models & weights
 # ─────────────────────────────────────────────────────────────────────────────
 
-BI_MODEL    = "all-mpnet-base-v2"
-CROSS_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-INDEX_FILE  = os.path.join(os.path.dirname(__file__), ".index_mpnet.pkl")
+BI_MODEL      = "all-mpnet-base-v2"
+CROSS_MODEL   = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+INDEX_FILE    = os.path.join(os.path.dirname(__file__), ".index_mpnet.pkl")
 
 W_BM25  = 0.30
 W_BI    = 0.20
@@ -235,7 +235,7 @@ def check_constraints(course: dict, profile: StudentProfile) -> tuple[bool, list
 
     sections = course.get("sections", [])
     if not sections:
-        return True, ["No timetabled section — verify in SIS."]
+        return False, ["No active sections this semester."]
 
     free_sections: list[str] = []
     blocked_sections: list[str] = []

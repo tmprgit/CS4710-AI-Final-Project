@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Course Recommender</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <h1>Course Recommender</h1>
+
+    <div class="grid">
+        <div>
+            <h2>Completed Courses</h2>
+            <input type="text" id="searchSubject" placeholder="Subject (e.g., CS)">
+            <input type="text" id="searchNumber" placeholder="Number (e.g., 1110)">
+            <input type="text" id="searchTitle" placeholder="Title">
+            <div class="courses" id="coursesList"></div>
+        </div>
+
+        <div>
+            <h2>Major</h2>
+            <input id="major" value="Computer Science">
+
+            <h2>Year</h2>
+            <select id="year">
+                <option value="1">Freshman</option>
+                <option value="2" selected>Sophomore</option>
+                <option value="3">Junior</option>
+                <option value="4">Senior</option>
+            </select>
+
+            <h2>What are you looking for?</h2>
+            <textarea id="query" placeholder="e.g., machine learning with real datasets..."></textarea>
+
+            <label>Desired credits: <input type="number" id="targetCredits" value="15" min="1" max="30" style="width:80px"></label>
+
+            <button onclick="buildSchedule()">Build Schedule</button>
+            <button onclick="clearAll()">Clear</button>
+        </div>
+    </div>
+
+    <div id="results" style="display:none"></div>
+
+    <script src="scripts.js"></script>
+</body>
+</html>

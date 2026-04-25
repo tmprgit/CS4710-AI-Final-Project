@@ -16,6 +16,7 @@ from typing import Optional
 
 from engine import CourseRecommender, StudentProfile, CourseResult
 from catalog import COURSES, EXAMPLE_PROFILES
+from scheduler import find_similar_course_pairs, build_schedules
 from dotenv import load_dotenv
 from huggingface_hub import login
 import os
@@ -99,7 +100,7 @@ def _format_section_schedule(section: dict) -> str:
     return "; ".join(meeting_bits) if meeting_bits else "TBA"
 
 
-def print_result(rank: int, r: CourseResult, verbose: bool = False) -> None:
+def print_result(rank: int, r: CourseResult, profile: Optional[StudentProfile] = None, verbose: bool = False) -> None:
     c = r.course
 
     # ── Header line ────────────────────────────────────────────────────────
@@ -147,8 +148,16 @@ def print_result(rank: int, r: CourseResult, verbose: bool = False) -> None:
         print(f"\n     {tag_str}")
 
     # ── Prereqs ────────────────────────────────────────────────────────────
-    prereq_text = _format_prerequisites(c)
-    if prereq_text:
+    prereqs = c.get("prereqs", [])
+    if prereqs:
+        if profile:
+            prereq_strs = []
+            for p in prereqs:
+                check = _c("✓", GREEN) if p in profile.completed else _c("✗", RED)
+                prereq_strs.append(f"{check} {p}")
+            prereq_text = ", ".join(prereq_strs)
+        else:
+            prereq_text = _format_prerequisites(c)
         print(f"     {_c('Prereqs:', DIM)} {_c(prereq_text, YELLOW)}")
 
     # ── Student review snippet ─────────────────────────────────────────────
@@ -167,6 +176,14 @@ def print_result(rank: int, r: CourseResult, verbose: bool = False) -> None:
 
 def print_separator():
     print("\n" + _c("  " + "─" * 74, DIM))
+
+
+def print_schedule(rank, sched):
+    pen_str = _c(f"  -{sched.penalty:.2f} penalty", RED) if sched.penalty else ""
+    print(f"\n  {_c(f'Schedule {rank}', BOLD, CYAN)}  score={_c(f'{sched.total_score:.2f}', BOLD, GREEN)}{pen_str}")
+    for slot in sched.courses:
+        print(f"    {_c(slot.course['id'], CYAN):<18}  {_c(slot.course['title'], WHITE)[:42]:<42}  {_c(f'{slot.recommendation_score:.0%}', YELLOW)}")
+        print(f"    {' ' * 18}  {_c(_format_section_schedule(slot.section), DIM)}  {_c(slot.section.get('instructor', 'TBA'), ITALIC, DIM)}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -307,6 +324,7 @@ HELP = """
   Commands
   ────────────────────────────────────────────────────────────────────
   <query>        Natural-language search for courses
+  schedule       Build a scored class schedule from a search query
   top <n>        Change number of results shown (default 5)
   verbose        Toggle verbose tag display
   profile        Rebuild your student profile
@@ -324,6 +342,30 @@ HELP = """
 
   Your major and completed courses are automatically factored in.
 """
+
+
+def run_schedule_builder(rec: CourseRecommender, profile: StudentProfile) -> None:
+    print(_c("\n  ── Schedule Builder ──────────────────────────────────────────────\n", BOLD))
+
+    query = input(_c("  What are you looking for? ", CYAN)).strip()
+    if not query:
+        return
+
+    target_credits = int(_ask("  Target credits", "15"))
+
+    results = rec.query(query, profile, top_k=40)
+    similar_pairs = find_similar_course_pairs([r.course for r in results], rec.bi)
+    schedules = build_schedules(results, None, similar_pairs, student_year=profile.year, target_credits=target_credits, top_n=5)
+
+    if not schedules:
+        print(_c("  No valid schedules found.", YELLOW))
+        return
+
+    print(_c(f"\n  Top {len(schedules)} schedule(s) for: \"{query}\"\n", BOLD))
+    for i, sched in enumerate(schedules, 1):
+        print_schedule(i, sched)
+    print_separator()
+    print()
 
 
 def search_loop(rec: CourseRecommender, profile: StudentProfile) -> None:
@@ -363,6 +405,8 @@ def search_loop(rec: CourseRecommender, profile: StudentProfile) -> None:
                 print(_c("  Usage: top <number>", RED))
         elif lower == "profile":
             profile = build_profile_interactively()
+        elif lower == "schedule":
+            run_schedule_builder(rec, profile)
         else:
             # ── Run the two-stage retrieval ────────────────────────────────
             print(_c("\n  Retrieving…\n", DIM))
@@ -379,7 +423,7 @@ def search_loop(rec: CourseRecommender, profile: StudentProfile) -> None:
             print(_c(f"\n  {label} for: \"{raw}\"\n", BOLD))
 
             for i, r in enumerate(results, 1):
-                print_result(i, r, verbose=verbose)
+                print_result(i, r, profile=profile, verbose=verbose)
             print_separator()
             print()
 
@@ -439,7 +483,7 @@ def run_demo(rec: CourseRecommender) -> None:
             print(_c(f"  Query: \"{query}\"", BOLD, WHITE))
             results = rec.query(query, profile, top_k=3)
             for i, r in enumerate(results, 1):
-                print_result(i, r)
+                print_result(i, r, profile=profile)
             print_separator()
             print()
 
