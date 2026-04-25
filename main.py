@@ -16,6 +16,14 @@ from typing import Optional
 
 from engine import CourseRecommender, StudentProfile, CourseResult
 from catalog import COURSES, EXAMPLE_PROFILES
+from dotenv import load_dotenv
+from huggingface_hub import login
+import os
+
+load_dotenv()
+hf_token = os.getenv("HF_TOKEN")
+if hf_token:
+    login(token=hf_token)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ANSI helpers
@@ -72,6 +80,25 @@ def _stars(difficulty: int) -> str:
     return _c(filled, YELLOW) + _c(empty, DIM)
 
 
+def _format_prerequisites(course: dict) -> str:
+    groups = course.get("prereq_groups", [])
+    if groups:
+        return "; ".join(" or ".join(group) for group in groups)
+    return ", ".join(course.get("prereqs", []))
+
+
+def _format_section_schedule(section: dict) -> str:
+    meeting_bits: list[str] = []
+    for meeting in section.get("meetings", []):
+        days_abbr = "/".join(day[:2] for day in meeting.get("days", [])) or "TBA"
+        if meeting.get("start") and meeting.get("end"):
+            time_str = f"{meeting['start']}–{meeting['end']}"
+        else:
+            time_str = "TBA"
+        meeting_bits.append(f"{days_abbr} {time_str}")
+    return "; ".join(meeting_bits) if meeting_bits else "TBA"
+
+
 def print_result(rank: int, r: CourseResult, verbose: bool = False) -> None:
     c = r.course
 
@@ -100,11 +127,12 @@ def print_result(rank: int, r: CourseResult, verbose: bool = False) -> None:
 
     # ── Sections ───────────────────────────────────────────────────────────
     sections = c.get("sections", [])
-    for sec in sections:
-        days_abbr = "/".join(d[:2] for d in sec["days"])
+    for sec in sections[:5]:
+        schedule_str = _format_section_schedule(sec)
         instr = _c(sec.get("instructor", "TBA"), ITALIC)
-        print(f"     {_c('§' + sec['section'], DIM)}  {days_abbr}  "
-              f"{sec['start']}–{sec['end']}  {instr}")
+        print(f"     {_c('§' + sec['section'], DIM)}  {schedule_str}  {instr}")
+    if len(sections) > 5:
+        print(f"     {_c(f'… {len(sections) - 5} more section entries', DIM)}")
 
     # ── Description ────────────────────────────────────────────────────────
     desc = textwrap.fill(
@@ -119,9 +147,9 @@ def print_result(rank: int, r: CourseResult, verbose: bool = False) -> None:
         print(f"\n     {tag_str}")
 
     # ── Prereqs ────────────────────────────────────────────────────────────
-    prereqs = c.get("prereqs", [])
-    if prereqs:
-        print(f"     {_c('Prereqs:', DIM)} {_c(', '.join(prereqs), YELLOW)}")
+    prereq_text = _format_prerequisites(c)
+    if prereq_text:
+        print(f"     {_c('Prereqs:', DIM)} {_c(prereq_text, YELLOW)}")
 
     # ── Student review snippet ─────────────────────────────────────────────
     review = c.get("reviews", "")
@@ -155,7 +183,8 @@ def list_courses() -> None:
     for dept in sorted(by_dept):
         print(f"  {_c(dept, CYAN, BOLD)}")
         for c in sorted(by_dept[dept], key=lambda x: x["number"]):
-            prereq_str = f"  ← {', '.join(c['prereqs'])}" if c["prereqs"] else ""
+            prereq_text = _format_prerequisites(c)
+            prereq_str = f"  ← {prereq_text}" if prereq_text else ""
             diff = "★" * c.get("difficulty", 3)
             print(f"    {c['id']:<14}  {c['title']:<48}  {c['credits']} cr  {diff}{prereq_str}")
         print()
@@ -238,7 +267,7 @@ def build_profile_interactively() -> StudentProfile:
     print(_c("\n  Courses already completed — enter IDs separated by commas.", DIM))
     print(_c("  Example: CS1110, MATH1310, ENWR1510", DIM))
     raw_completed = _ask("  Completed", "")
-    completed = [x.strip().upper() for x in raw_completed.split(",") if x.strip()]
+    completed = ["".join(x.split()).upper() for x in raw_completed.split(",") if x.strip()]
 
     # Validate against catalog
     valid_ids = {c["id"] for c in COURSES}

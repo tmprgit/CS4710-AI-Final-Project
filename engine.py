@@ -1,25 +1,6 @@
 """
 engine.py — Three-signal hybrid retrieval engine.
 
-WHY THE OLD APPROACH UNDERPERFORMED
-═════════════════════════════════════════════════════════════════════════════
-The previous version used semantic embeddings alone (bi-encoder + cross-
-encoder). That fails on two important query types:
-
-1. CATEGORICAL / DEPARTMENT QUERIES — "math courses", "CS electives"
-   Semantic models treat these as "courses about mathematical topics."
-   Fourteen courses in our catalog contain the word "math*" somewhere in
-   their text — CS, STAT, PHYS, SYS, DS courses all qualify — so a MATH
-   course has no ranking advantage over them on semantic similarity alone.
-
-2. KEYWORD QUERIES — "NLP transformers BERT", "SQL joins"
-   When a user names a specific technology or acronym, a dense embedding
-   averages that signal across 768 dimensions. BM25's exact-token matching
-   handles these with much higher precision.
-
-THE FIX: THREE-SIGNAL HYBRID
-═════════════════════════════════════════════════════════════════════════════
-
   Signal 1 — Department alias boost  (rule-based, ~0 ms)
     Explicit map from common terms ("math", "cs", "econ") to course
     mnemonics. If the query references a department, courses in that
@@ -42,28 +23,6 @@ THE FIX: THREE-SIGNAL HYBRID
 
   Final score = dept_boost × (w_bm25×bm25_norm + w_bi×bi_norm + w_cross×cross_norm)
   Weights: BM25 0.30 · bi-encoder 0.20 · cross-encoder 0.50
-
-ON THE LOW CONFIDENCE NUMBERS (20–30%)
-═════════════════════════════════════════════════════════════════════════════
-Those numbers ARE a sign of underperformance, not normal behaviour.
-
-The cross-encoder (ms-marco-MiniLM-L-6-v2) was trained on MS MARCO —
-pairs of web search queries and Wikipedia/web passages. It learned to score
-"does this web passage answer this web query?", not "is this course relevant?"
-Its logits are calibrated for that task. When we sigmoid-normalise them on a
-completely different domain, the raw scale means little.
-
-More importantly, when the RANKING is wrong (DS1002 above MATH1310 for "math
-courses"), the absolute numbers don't matter — the model is making a wrong
-decision, not just expressing low confidence. That's fixed by adding BM25 and
-department detection, which act as strong categorical priors the cross-encoder
-lacks entirely.
-
-After this fix you should see:
-  • MATH courses ranking 1–5 for "math courses"
-  • Final scores in the 0.50–0.85 range for good matches
-  • Specific keyword queries (e.g. "NLP transformers") scoring > 0.70
-═════════════════════════════════════════════════════════════════════════════
 """
 
 from __future__ import annotations
@@ -209,6 +168,13 @@ class StudentProfile:
     busy_times: list[dict] = field(default_factory=list)
     career_goals: str = ""
 
+    def __post_init__(self) -> None:
+        self.completed = [
+            normalized_code
+            for normalized_code in (_normalize_course_code(code) for code in self.completed)
+            if normalized_code
+        ]
+
     @classmethod
     def from_dict(cls, d: dict) -> "StudentProfile":
         return cls(
@@ -231,37 +197,91 @@ def _t(s: str) -> dtime:
 def _overlap(a0: str, a1: str, b0: str, b1: str) -> bool:
     return _t(a0) < _t(b1) and _t(b0) < _t(a1)
 
+
+def _normalize_course_code(raw_code: str) -> str:
+    return re.sub(r"\s+", "", raw_code or "").upper()
+
+
+def _dedupe_preserving_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique_values: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        unique_values.append(value)
+    return unique_values
+
 def check_constraints(course: dict, profile: StudentProfile) -> tuple[bool, list[str]]:
     notes: list[str] = []
+    completed_courses = set(profile.completed)
 
-    if course["id"] in profile.completed:
+    if course["id"] in completed_courses:
         return False, ["Already completed."]
 
-    missing = [p for p in course.get("prereqs", []) if p not in profile.completed]
-    if missing:
-        return False, [f"Missing prereq(s): {', '.join(missing)}"]
+    prereq_groups = course.get("prereq_groups") or []
+    if prereq_groups:
+        missing_groups = [
+            " or ".join(group)
+            for group in prereq_groups
+            if not any(option in completed_courses for option in group)
+        ]
+        if missing_groups:
+            return False, [f"Missing prereq(s): {'; '.join(missing_groups)}"]
+    else:
+        missing = [prereq for prereq in course.get("prereqs", []) if prereq not in completed_courses]
+        if missing:
+            return False, [f"Missing prereq(s): {', '.join(missing)}"]
 
     sections = course.get("sections", [])
     if not sections:
         return True, ["No timetabled section — verify in SIS."]
 
-    free, blocked = [], []
-    for sec in sections:
-        sec_days = set(sec["days"])
-        conflict = any(
-            sec_days & set(b["days"]) and _overlap(sec["start"], sec["end"], b["start"], b["end"])
-            for b in profile.busy_times
-        )
-        (blocked if conflict else free).append(sec["section"])
+    free_sections: list[str] = []
+    blocked_sections: list[str] = []
+    tba_sections: list[str] = []
 
-    if free:
-        if blocked:
-            notes.append(
-                f"Section(s) {', '.join(blocked)} conflict — "
-                f"{', '.join(free)} available."
+    for sec in sections:
+        meetings = sec.get("meetings", [])
+        scheduled_meetings = [
+            meeting
+            for meeting in meetings
+            if meeting.get("days") and meeting.get("start") and meeting.get("end")
+        ]
+
+        if not scheduled_meetings:
+            free_sections.append(sec["section"])
+            tba_sections.append(sec["section"])
+            continue
+
+        has_conflict = any(
+            any(
+                set(meeting["days"]) & set(busy_time["days"])
+                and _overlap(meeting["start"], meeting["end"], busy_time["start"], busy_time["end"])
+                for busy_time in profile.busy_times
             )
+            for meeting in scheduled_meetings
+        )
+
+        if has_conflict:
+            blocked_sections.append(sec["section"])
+        else:
+            free_sections.append(sec["section"])
+
+    free_sections = _dedupe_preserving_order(free_sections)
+    blocked_sections = _dedupe_preserving_order(blocked_sections)
+    tba_sections = _dedupe_preserving_order(tba_sections)
+
+    if free_sections:
+        if blocked_sections:
+            notes.append(
+                f"Section(s) {', '.join(blocked_sections)} conflict — "
+                f"{', '.join(free_sections)} available."
+            )
+        if tba_sections:
+            notes.append(f"Section(s) {', '.join(tba_sections)} have TBA meeting times.")
         return True, notes
-    return False, ["All sections conflict with your schedule."]
+    return False, ["All scheduled sections conflict with your schedule."]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -367,9 +387,13 @@ class CourseRecommender:
             "PPL": "Public Policy",
             "SYS": "Systems Engineering",
         }
-        dept_name = dept_names.get(mnem, mnem)
+        dept_name = course.get("subject_descr") or dept_names.get(mnem, mnem)
         tags = " ".join(course.get("tags", []))
-        prereq_str = ", ".join(course.get("prereqs", [])) or "none"
+        prereq_groups = course.get("prereq_groups") or []
+        if prereq_groups:
+            prereq_str = "; ".join(" or ".join(group) for group in prereq_groups)
+        else:
+            prereq_str = ", ".join(course.get("prereqs", [])) or "none"
         wl = course.get("workload_hrs_week", "")
         wl_str = f"Workload approximately {wl} hours per week." if wl else ""
         reviews = course.get("reviews", "")
@@ -406,7 +430,7 @@ class CourseRecommender:
 
     def build_index(self, courses: list[dict], force: bool = False) -> None:
         self.courses = courses
-        ids = [c["id"] for c in courses]
+        ids = [c.get("key", c["id"]) for c in courses]
 
         # Always rebuild BM25 in memory (it's instant)
         doc_texts = [self._doc_text(c) for c in courses]
