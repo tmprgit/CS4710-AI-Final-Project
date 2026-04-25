@@ -83,11 +83,14 @@ def print_result(rank: int, r: CourseResult, verbose: bool = False) -> None:
     print(f"\n  {rank_str}  {title_str}  {_c('·', DIM)}  {code_str}  {credit_str}")
 
     # ── Score bar ──────────────────────────────────────────────────────────
-    bar = _score_bar(r.final_score)
-    pct = _c(f"{r.final_score:.0%}", BOLD)
-    bi_note  = _c(f"bi:{r.bi_score:.2f}", DIM)
-    cx_note  = _c(f"cross:{r.cross_score:.2f}", DIM)
-    print(f"     Match  {bar}  {pct}   {bi_note}  {cx_note}")
+    bar  = _score_bar(r.final_score)
+    pct  = _c(f"{r.final_score:.0%}", BOLD)
+    sigs = _c(
+        f"bm25:{r.bm25_score:.1f}  bi:{r.bi_score:.2f}  cross:{r.cross_score:.2f}",
+        DIM
+    )
+    boost_tag = _c(" ★dept", MAGENTA) if r.dept_boosted else ""
+    print(f"     Match  {bar}  {pct}{boost_tag}   {sigs}")
 
     # ── Difficulty & workload ──────────────────────────────────────────────
     diff_str = _stars(c.get("difficulty", 3))
