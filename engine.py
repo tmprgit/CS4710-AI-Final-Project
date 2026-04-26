@@ -35,6 +35,8 @@ from datetime import time as dtime
 from typing import Optional
 
 import numpy as np
+from nltk.stem import PorterStemmer
+_stemmer = PorterStemmer()
 
 try:
     from rank_bm25 import BM25Okapi
@@ -142,9 +144,6 @@ DEPT_ALIASES: dict[str, set[str]] = {
     "ppl":            {"PPL"},
     "policy":         {"PPL"},
 }
-
-# Phrases to check (longest first so "computer science" beats "computer")
-_DEPT_PHRASES = sorted(DEPT_ALIASES.keys(), key=len, reverse=True)
 
 # BM25 stop-words that are meaningless in a course catalog context
 _BM25_STOP = {
@@ -305,27 +304,10 @@ class CourseResult:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _tokenize(text: str) -> list[str]:
-    """Lowercase word tokens, stripped of BM25 stop-words."""
+    """Lowercase word tokens, stemmed, stripped of BM25 stop-words."""
     tokens = re.findall(r"[a-z0-9]+", text.lower())
-    return [t for t in tokens if t not in _BM25_STOP]
+    return [_stemmer.stem(t) for t in tokens if t not in _BM25_STOP]
 
-
-def _detect_dept_mnemonics(query: str) -> set[str]:
-    """
-    Return the set of mnemonics hinted at by the query.
-    Uses word-boundary regex so short aliases like 'cs' don't
-    fire inside longer words like 'statistics' or 'physics'.
-    Multi-word phrases are checked first (longest match wins).
-    """
-    q_lower = query.lower()
-    matched: set[str] = set()
-    for phrase in _DEPT_PHRASES:
-        # Build a pattern: word boundary on each end, spaces between words
-        escaped = re.escape(phrase)
-        pattern = r"\b" + escaped + r"\b"
-        if re.search(pattern, q_lower):
-            matched.update(DEPT_ALIASES[phrase])
-    return matched
 
 
 def _minmax(arr: np.ndarray) -> np.ndarray:
@@ -341,6 +323,7 @@ def _minmax(arr: np.ndarray) -> np.ndarray:
 
 class CourseRecommender:
 
+
     def __init__(self):
         if not _ST_OK:
             raise ImportError("Run: pip install sentence-transformers")
@@ -355,6 +338,21 @@ class CourseRecommender:
         self.courses: list[dict] = []
         self.embeddings: Optional[np.ndarray] = None
         self.bm25: Optional[BM25Okapi] = None
+        
+        # ── NEW: Dynamic alias trackers ──
+        self.dept_aliases: dict[str, set[str]] = DEPT_ALIASES.copy()
+        self.dept_phrases: list[str] = []
+
+    def _detect_dept_mnemonics(self, query: str) -> set[str]:
+        """Dynamically detect department mnemonics based on catalog data."""
+        q_lower = query.lower()
+        matched: set[str] = set()
+        for phrase in self.dept_phrases:
+            escaped = re.escape(phrase)
+            pattern = r"\b" + escaped + r"\b"
+            if re.search(pattern, q_lower):
+                matched.update(self.dept_aliases[phrase])
+        return matched
 
     # ── Document text ──────────────────────────────────────────────────────
 
@@ -472,20 +470,22 @@ class CourseRecommender:
         if self.embeddings is None or self.bm25 is None:
             raise RuntimeError("Call build_index() first.")
 
+        # Keep augmented for the cross-encoder later
         augmented = self._augment_query(raw_query, profile)
 
         # ── Department detection ───────────────────────────────────────────
-        dept_mnemonics = _detect_dept_mnemonics(raw_query)
-        
+        # Note: now calling the class method `self._detect_dept_mnemonics`
+        dept_mnemonics = self._detect_dept_mnemonics(raw_query)
+
         # ── Signal 1: BM25 ────────────────────────────────────────────────
-        # FIX: Use raw_query here. Stop profile keywords from hijacking the search.
+        # Using raw_query to prevent profile hijacking
         bm25_raw = np.array(
             self.bm25.get_scores(_tokenize(raw_query)), dtype=np.float32
         )
         bm25_norm = _minmax(bm25_raw)
 
         # ── Signal 2: bi-encoder ──────────────────────────────────────────
-        # FIX: Use raw_query here to capture semantic intent of the user's actual text.
+        # Using raw_query
         q_vec = self.bi.encode(
             raw_query, convert_to_numpy=True, normalize_embeddings=True
         )
@@ -494,11 +494,17 @@ class CourseRecommender:
 
         # ── Blend signals 1+2, take top candidates for cross-encoder ──────
         combined = W_BM25 * bm25_norm + W_BI * bi_norm
+
+        # ── Apply Department Boost (Stage 1) ───────────────────────────────
+        if dept_mnemonics:
+            for i, course in enumerate(self.courses):
+                if course["mnemonic"] in dept_mnemonics:
+                    combined[i] *= DEPT_BOOST
+
         top_idx = np.argsort(combined)[::-1][:STAGE1_CANDIDATES]
 
         # ── Signal 3: cross-encoder ───────────────────────────────────────
-        # Keep `augmented` here! The cross-encoder is smart enough to use 
-        # the profile data as a tie-breaker among the top 50 valid candidates.
+        # Using the augmented profile query for intelligent reranking!
         pairs = [(augmented, self._doc_text(self.courses[i])) for i in top_idx]
         raw_cross = self.cross.predict(pairs, show_progress_bar=False)
         cross_norm = 1.0 / (1.0 + np.exp(-raw_cross))   # sigmoid → [0,1]
@@ -506,15 +512,9 @@ class CourseRecommender:
         # Normalise within candidates so blend is fair
         bi_cand   = _minmax(bi_raw[top_idx])
         bm25_cand = _minmax(bm25_raw[top_idx])
+        
+        # Final semantic blend without the heavy multiplier
         blended   = W_BM25 * bm25_cand + W_BI * bi_cand + W_CROSS * cross_norm
-
-        # ── Department boost ──────────────────────────────────────────────
-        if dept_mnemonics:
-            for rank_pos, course_idx in enumerate(top_idx):
-                if self.courses[course_idx]["mnemonic"] in dept_mnemonics:
-                    blended[rank_pos] *= DEPT_BOOST
-            # Re-normalise so scores stay in [0,1]
-            blended = _minmax(blended)
 
         # ── Sort and apply constraints ─────────────────────────────────────
         order = np.argsort(blended)[::-1]
