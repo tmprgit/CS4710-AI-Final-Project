@@ -476,16 +476,18 @@ class CourseRecommender:
 
         # ── Department detection ───────────────────────────────────────────
         dept_mnemonics = _detect_dept_mnemonics(raw_query)
-
+        
         # ── Signal 1: BM25 ────────────────────────────────────────────────
+        # FIX: Use raw_query here. Stop profile keywords from hijacking the search.
         bm25_raw = np.array(
-            self.bm25.get_scores(_tokenize(augmented)), dtype=np.float32
+            self.bm25.get_scores(_tokenize(raw_query)), dtype=np.float32
         )
         bm25_norm = _minmax(bm25_raw)
 
         # ── Signal 2: bi-encoder ──────────────────────────────────────────
+        # FIX: Use raw_query here to capture semantic intent of the user's actual text.
         q_vec = self.bi.encode(
-            augmented, convert_to_numpy=True, normalize_embeddings=True
+            raw_query, convert_to_numpy=True, normalize_embeddings=True
         )
         bi_raw: np.ndarray = self.embeddings @ q_vec
         bi_norm = _minmax(bi_raw)
@@ -495,6 +497,8 @@ class CourseRecommender:
         top_idx = np.argsort(combined)[::-1][:STAGE1_CANDIDATES]
 
         # ── Signal 3: cross-encoder ───────────────────────────────────────
+        # Keep `augmented` here! The cross-encoder is smart enough to use 
+        # the profile data as a tie-breaker among the top 50 valid candidates.
         pairs = [(augmented, self._doc_text(self.courses[i])) for i in top_idx]
         raw_cross = self.cross.predict(pairs, show_progress_bar=False)
         cross_norm = 1.0 / (1.0 + np.exp(-raw_cross))   # sigmoid → [0,1]
